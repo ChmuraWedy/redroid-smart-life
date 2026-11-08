@@ -1,0 +1,23 @@
+name: redroid11
+
+services:
+  redroid:
+    image: redroid/redroid:11.0.0-latest@sha256:60b0810684be4578733a847be3314c50b70f73bc92405b5a627ebe9b633ebb5e
+    platform: linux/amd64
+    privileged: true
+    ports:
+      - "127.0.0.1:${REDROID_ADB_PORT:-5555}:5555"
+    volumes:
+      - android-data:/data
+      - ./android/android.hardware.bluetooth_le.xml:/vendor/etc/permissions/android.hardware.bluetooth_le.xml:ro
+      - ./android/bluetooth-hci-bridge11:/vendor/bin/hw/redroid-hci-bridge11:ro
+    command:
+      - androidboot.use_memfd=true
+      - androidboot.redroid_width=540
+      - androidboot.redroid_height=960
+      - androidboot.redroid_dpi=240
+      - androidboot.redroid_fps=15
+      - ro.secure=${REDROID_ADB_SECURE:-1}
+
+volumes:
+  android-data:

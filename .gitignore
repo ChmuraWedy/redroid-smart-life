@@ -1,0 +1,8 @@
+.bridge.lock
+.env
+.venv/
+__pycache__/
+*.apk
+*.apkm
+*.xapk
+*.log
