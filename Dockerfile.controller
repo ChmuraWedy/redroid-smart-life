@@ -1,0 +1,12 @@
+FROM python:3.12-slim-bookworm
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends adb \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY smart_life_add_device.py smart_life_login.py smart_life_account.py smart_life_scan_qr.py ./
+
+ENTRYPOINT ["python", "smart_life_login.py"]

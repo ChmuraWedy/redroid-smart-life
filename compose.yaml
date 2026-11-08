@@ -19,5 +19,28 @@ services:
       - androidboot.redroid_fps=15
       - ro.secure=${REDROID_ADB_SECURE:-1}
 
+  controller:
+    profiles: [controller]
+    build: &controller_build
+      context: .
+      dockerfile: Dockerfile.controller
+    command: [--adb-serial, "redroid:5555"]
+    secrets:
+      - smart_life_login
+
+  account-reader:
+    profiles: [controller]
+    build: *controller_build
+    entrypoint: [python, smart_life_account.py]
+
+  qr-scanner:
+    profiles: [controller]
+    build: *controller_build
+    entrypoint: [python, smart_life_scan_qr.py]
+
+secrets:
+  smart_life_login:
+    file: ${SMART_LIFE_SECRETS_FILE:-./secrets/smart-life.env}
+
 volumes:
   android-data:
