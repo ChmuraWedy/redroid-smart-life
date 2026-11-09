@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
-"""Install Smart Life, open pairing, or list rooms on the Dell 5070."""
+"""Install, view, or automate Smart Life on the Dell 5070."""
 
 import argparse
 from contextlib import ExitStack
 import json
 from pathlib import Path
 import re
+from select import select
 import shlex
+from shutil import which
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+from urllib.error import HTTPError, URLError
+from urllib.request import ProxyHandler, Request, build_opener
 
 
 PACKAGE = "com.tuya.smartlife"
+PERMISSION_PACKAGE = "com.android.permissioncontroller"
 LAUNCH_ACTIVITY = "com.smart.ThingSplashActivity"
 HOME_ACTIVITY = "com.thingclips.smart.hometab.activity.FamilyHomeActivity"
 LOGIN_ACTIVITY = "com.thingclips.smart.login.ui.activity.LoginActivity"
@@ -44,11 +49,15 @@ def stop(process):
         process.wait()
 
 
-def start_ssh(stack, command, log):
+def start_ssh(stack, command, log, *, pipes=False):
     with log.open("wb") as output:
-        process = subprocess.Popen(command, stdin=subprocess.DEVNULL,
-                                   stdout=output, stderr=subprocess.STDOUT)
+        process = subprocess.Popen(command, stdin=subprocess.PIPE if pipes else subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE if pipes else output,
+                                   stderr=output if pipes else subprocess.STDOUT)
     stack.callback(stop, process)
+    if pipes:
+        stack.callback(process.stdout.close)
+        stack.callback(process.stdin.close)
     return process
 
 
@@ -89,6 +98,17 @@ def connect_android(serial):
     return u2.connect(serial)
 
 
+def allow_permission(android, message, button):
+    prompt = android(packageName=PERMISSION_PACKAGE, resourceId=f"{PERMISSION_PACKAGE}:id/permission_message",
+                     text=message)
+    if not prompt.exists:
+        return False
+    allow = android(packageName=PERMISSION_PACKAGE, resourceId=f"{PERMISSION_PACKAGE}:id/{button}")
+    if not allow.click_exists(timeout=5):
+        raise RuntimeError("Could not grant the requested Smart Life permission.")
+    return True
+
+
 def open_add_device(android, adb):
     def visible(selector):
         # Smart Life's plus menu is a separate Android window.
@@ -105,8 +125,20 @@ def open_add_device(android, adb):
     add_menu = '//*[@content-desc="More manipulate menu" and @resource-id=""]'
     add_device = '//*[@text="Add Device" and @resource-id="com.tuya.smartlife:id/tv_option"]'
     title = '//*[@text="Add Device" and @package="com.tuya.smartlife"]'
+    location_message = "Allow SmartLife to access this device’s location?"
+    one_time = "permission_allow_one_time_button"
+
+    def pairing_ready():
+        location = android(packageName=PACKAGE, resourceId=smart_life_id("per_title"), text="Location")
+        if current_screen(android) == ADD_ACTIVITY and location.exists:
+            prompt = android(packageName=PACKAGE, resourceId=smart_life_id("btn_allow_access"), text="Continue")
+            prompt.click_exists(timeout=5)
+        allow_permission(android, location_message, one_time)
+        return current_screen(android) == ADD_ACTIVITY and visible(title) is not None
 
     for attempt in range(2):
+        if allow_permission(android, location_message, one_time):
+            wait_for("Smart Life to return to Add Device", 10, lambda: current_screen(android) == ADD_ACTIVITY)
         if current_screen(android) not in (HOME_ACTIVITY, ADD_ACTIVITY):
             run([*adb, "shell", "am", "start", "-n", f"{PACKAGE}/{LAUNCH_ACTIVITY}"])
         try:
@@ -114,12 +146,13 @@ def open_add_device(android, adb):
                      lambda: current_screen(android) in (HOME_ACTIVITY, ADD_ACTIVITY))
             if current_screen(android) == HOME_ACTIVITY:
                 if visible(add_device) is None:
+                    home_tab = android(packageName=PACKAGE, resourceId=smart_life_id("title"), text="Home")
+                    home_tab.click_exists(timeout=3)
                     wait_for("Smart Life's + button", 25,
                              lambda: current_screen(android) == HOME_ACTIVITY and click_visible(add_menu))
                 wait_for("Smart Life's Add Device menu item", 25,
                          lambda: current_screen(android) == HOME_ACTIVITY and click_visible(add_device))
-            wait_for("Smart Life Add Device screen", 15,
-                     lambda: current_screen(android) == ADD_ACTIVITY and visible(title) is not None)
+            wait_for("Smart Life Add Device screen", 20, pairing_ready)
             return
         except RuntimeError as exc:
             current = android.app_current()
@@ -292,11 +325,50 @@ def open_login(android):
              lambda: current_screen(android) in (LOGIN_ACTIVITY, HOME_ACTIVITY))
 
 
+def finish_install(android):
+    accept_user_agreement(android)
+    decline_tracking(android)
+    dismiss_root_warning(android)
+    open_login(android)
+
+
+def view_api_token(tunnel, log):
+    readable, _, _ = select([tunnel.stdout], [], [], 12)
+    line = tunnel.stdout.readline(4096) if readable else b""
+    prefix, _, token = line.strip().partition(b" ")
+    if prefix != b"SMART_LIFE_VIEW" or not re.fullmatch(rb"[!-~]{32,}", token):
+        details = log.read_text(errors="replace").strip()
+        raise RuntimeError("Could not read the controller token through SSH."
+                           + (f"\n{details}" if details else ""))
+    return token.decode("ascii")
+
+
+def wake_for_view(port, token):
+    request = Request(f"http://127.0.0.1:{port}/v1/android/wake",
+                      headers={"Authorization": f"Bearer {token}"}, method="POST")
+    try:
+        with build_opener(ProxyHandler({})).open(request, timeout=20):
+            pass
+    except HTTPError as error:
+        try:
+            detail = json.load(error).get("detail", error.reason)
+        except (AttributeError, ValueError):
+            detail = error.reason
+        raise RuntimeError(f"Controller HTTP {error.code}: {detail}") from None
+    except URLError as error:
+        raise RuntimeError(f"Could not reach the Dell controller API: {error.reason}") from None
+
+
+def show_scrcpy(serial):
+    if subprocess.call(["scrcpy", "-s", serial, "--no-audio"]):
+        raise RuntimeError("scrcpy exited with an error.")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", nargs="?", default="add-device",
-                        choices=("add-device", "list-rooms", "install-app"),
-                        help="open Add Device (default), list rooms as JSON, or install Smart Life")
+                        choices=("add-device", "list-rooms", "install-app", "view"),
+                        help="open Add Device (default), list rooms, install Smart Life, or open scrcpy")
     parser.add_argument("--apk", nargs="+", type=Path,
                         help="for install-app, a standalone APK or the base APK and all splits")
     parser.add_argument("--view", action="store_true", help="open scrcpy after install-app")
@@ -304,9 +376,10 @@ def main():
     parser.add_argument("--remote-dir", default="redroid-smart-life",
                         help="Clone location, absolute or relative to the SSH login directory")
     parser.add_argument("--remote-port", type=int, default=5555, help="ADB port on the Dell")
+    parser.add_argument("--remote-api-port", type=int, default=18765, help="Controller API port on the Dell for view")
     parser.add_argument("--port", type=int, default=15559, help="Local ADB tunnel port")
     args = parser.parse_args()
-    if not all(1 <= port <= 65535 for port in (args.port, args.remote_port)):
+    if not all(1 <= port <= 65535 for port in (args.port, args.remote_port, args.remote_api_port)):
         parser.error("ports must be between 1 and 65535")
     if args.command == "install-app":
         if not args.apk or any(path.suffix.lower() != ".apk" or not path.is_file() for path in args.apk):
@@ -314,27 +387,48 @@ def main():
     elif args.apk or args.view:
         parser.error("--apk and --view are for install-app")
 
-    import uiautomator2 as u2
+    if args.command == "view":
+        for tool in ("adb", "scrcpy"):
+            if which(tool) is None:
+                parser.error(f"view requires {tool} on this Mac")
+    else:
+        import uiautomator2 as u2
 
     serial = f"127.0.0.1:{args.port}"
     adb = ["adb", "-s", serial]
     dell = [*SSH, "--", args.host]
     remote = f"cd {shlex.quote(args.remote_dir)} &&"
+    view = args.command == "view"
     with socket.socket() as port_check:
         try:
             port_check.bind(("127.0.0.1", args.port))
         except OSError as exc:
             raise RuntimeError(f"Local port {args.port} is unavailable. Use --port.") from exc
+        if view:
+            with socket.socket() as api_port_check:
+                api_port_check.bind(("127.0.0.1", 0))
+                api_port = api_port_check.getsockname()[1]
 
     with tempfile.TemporaryDirectory(prefix="smart-life-") as temporary, ExitStack() as stack:
-        if args.command != "list-rooms":
+        if args.command in ("add-device", "install-app"):
             print(f"Starting ReDroid on {args.host}.", flush=True)
             run([*dell, f"{remote} ./start.sh"], timeout=150)
         tunnel_log = Path(temporary) / "tunnel.log"
-        tunnel = start_ssh(
-            stack, [*SSH, "-o", "ExitOnForwardFailure=yes", "-N", "-L",
-                    f"{serial}:127.0.0.1:{args.remote_port}", "--", args.host], tunnel_log,
-        )
+        tunnel_command = [*SSH, "-o", "ExitOnForwardFailure=yes", "-L", f"{serial}:127.0.0.1:{args.remote_port}"]
+        if view:
+            # Keep the SSH channel alive through stdin and read the token from stdout only.
+            token_command = ('token=$(cat secrets/controller-api-token) && '
+                             'printf "SMART_LIFE_VIEW %s\\n" "$token" && exec cat >/dev/null')
+            tunnel_command.extend(["-T", "-o", "ControlPath=none", "-L",
+                                   f"127.0.0.1:{api_port}:127.0.0.1:{args.remote_api_port}",
+                                   "--", args.host, f"{remote} {token_command}"])
+        else:
+            tunnel_command.extend(["-N", "--", args.host])
+        tunnel = start_ssh(stack, tunnel_command, tunnel_log, pipes=view)
+        if view:
+            wait_for("controller API SSH tunnel", 12, lambda: tunnel_listening(api_port), tunnel, tunnel_log)
+            print(f"Waking ReDroid through the forwarded API at 127.0.0.1:{api_port}.", flush=True)
+            wake_for_view(api_port, view_api_token(tunnel, tunnel_log))
         wait_for("ADB SSH tunnel", 12, lambda: tunnel_listening(args.port), tunnel, tunnel_log)
         run(["adb", "disconnect", serial], check=False)
         stack.callback(run, ["adb", "disconnect", serial], check=False)
@@ -346,15 +440,14 @@ def main():
         wait_for("Android boot over ADB", 100, android_booted, tunnel, tunnel_log)
         if run([*adb, "shell", "getprop", "ro.build.version.release"]) != "11":
             raise RuntimeError(f"Expected Android 11 at {serial}.")
+        if view:
+            show_scrcpy(serial)
+            return
         if args.command == "install-app":
             install_app(adb, args.apk)
-            android = u2.connect(serial)
-            accept_user_agreement(android)
-            decline_tracking(android)
-            dismiss_root_warning(android)
-            open_login(android)
-            if args.view and subprocess.call(["scrcpy", "-s", serial, "--no-audio"]):
-                raise RuntimeError("scrcpy exited with an error.")
+            finish_install(u2.connect(serial))
+            if args.view:
+                show_scrcpy(serial)
             return
         if "package:" not in run([*adb, "shell", "pm", "path", PACKAGE]):
             raise RuntimeError("Smart Life is missing from Android 11.")

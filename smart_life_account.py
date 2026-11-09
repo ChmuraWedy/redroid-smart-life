@@ -49,9 +49,16 @@ def open_account_security(android, serial):
         return
 
     screens = (HOME_ACTIVITY, SETTINGS_ACTIVITY, ACCOUNT_ACTIVITY)
-    if current_screen(android) not in screens:
+    for attempt in range(2):
+        if current_screen(android) in screens:
+            break
         run(["adb", "-s", serial, "shell", "am", "start", "-n", f"{PACKAGE}/{LAUNCH_ACTIVITY}"])
-        wait_for("signed-in Smart Life", 25, lambda: current_screen(android) in screens)
+        try:
+            wait_for("signed-in Smart Life", 35, lambda: current_screen(android) in screens)
+            break
+        except RuntimeError:
+            if attempt or android.app_current()["package"] != "com.android.launcher3":
+                raise
     if current_screen(android) == HOME_ACTIVITY:
         click(android, "title", text="Me")
         click(android, "tv_menu_setting", description="Settings")
@@ -122,15 +129,19 @@ def read_cloud_projects(android, scroller):
     return list(projects)
 
 
+def read_account_security(android, serial):
+    open_account_security(android, serial)
+    scroller = android(packageName=PACKAGE, resourceId=smart_life_id("recycler_view"), scrollable=True)
+    result = read_account_rows(android, scroller)
+    result["cloud_development_projects"] = read_cloud_projects(android, scroller)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--adb-serial", default="redroid:5555", help="Android ADB host and port")
     args = parser.parse_args()
-    android = connect_android(args.adb_serial)
-    open_account_security(android, args.adb_serial)
-    scroller = android(packageName=PACKAGE, resourceId=smart_life_id("recycler_view"), scrollable=True)
-    result = read_account_rows(android, scroller)
-    result["cloud_development_projects"] = read_cloud_projects(android, scroller)
+    result = read_account_security(connect_android(args.adb_serial), args.adb_serial)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

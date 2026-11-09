@@ -75,6 +75,16 @@ sudo docker compose run --rm controller --code YOUR_CODE
 
 Smart Life submits the code when the field is filled. The controller fills **Set Password** from the secrets file and taps **Done**. On the privacy screen it declines optional sharing and personalized-ad consent, then taps **Go to App** and waits for Home. The same command can resume from **Set Password** or the privacy screen.
 
+## View ReDroid from a Mac
+
+With ADB and scrcpy installed and the Dell controller API running, run this from the Mac checkout.
+
+```bash
+./smart_life_add_device.py view --port 15569
+```
+
+The command opens one SSH connection with forwards for the controller API and ADB. It reads the API token over SSH, sends the wake request from your Mac, connects ADB, and launches scrcpy. Closing scrcpy closes both forwards and leaves Android awake for manual use. Use `/v1/android/idle` when you’re done. The `view` command works with the Mac’s system Python. If the Dell API listens on a custom port, pass it with `--remote-api-port`.
+
 ## Start Smart Life pairing from a Mac
 
 Run the control script in the same Python environment.
@@ -116,5 +126,56 @@ With ReDroid running and Smart Life signed in, run this from your Mac.
 ```
 
 The command opens **Me → Home Management** and reads **Room Management** for each home. It prints a JSON array with `home` and `rooms` fields. It uses a temporary ADB tunnel and leaves Smart Life on Home Management.
+
+## Call the controller API
+
+The `controller-api` service builds the `redroid-smart-life-controller:local` image and publishes the API on the Dell at `127.0.0.1:18765`. The Android app and its data stay in the ReDroid service. The API uses one worker and runs one Android operation at a time.
+
+From the Dell deployment directory, create the API token once and start the services.
+
+```bash
+umask 077
+mkdir -p secrets apks
+test -f secrets/controller-api-token || python3 -c 'import secrets; print(secrets.token_urlsafe(32))' > secrets/controller-api-token
+touch secrets/smart-life.env
+./start.sh
+sudo install -m 0644 redroid-power-agent@.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now "redroid-power-agent@$(id -un).service"
+sudo docker compose up -d --build controller-api
+```
+
+Put one Smart Life APK set in `apks/`, or point `SMART_LIFE_APK_DIR` in the Compose `.env` at your existing cache. The API mounts that directory and the login secrets read-only. Use `REDROID_API_PORT` in `.env` to change the loopback port.
+
+From another machine, open an SSH tunnel with `ssh -N -L 18765:127.0.0.1:18765 dell5070`. The OpenAPI UI is at `http://127.0.0.1:18765/docs`. Send the token from `secrets/controller-api-token` as an `Authorization: Bearer …` header on each `/v1` request.
+
+| Method and path | Operation |
+| --- | --- |
+| `GET /health` | Check that the API is ready |
+| `GET /v1/automation/status` | Read the latest automation, its timestamps, and the idle deadline |
+| `GET /v1/android/status` | Read Android power state, RAM, and swap without waking it |
+| `GET /v1/android/scrcpy` | Return the one-command Mac launcher and the individual viewing commands |
+| `POST /v1/android/wake` | Wake Android for direct ADB or scrcpy use |
+| `POST /v1/android/idle` | Freeze Android and reclaim RAM toward 120 MiB |
+| `POST /v1/install` | Install the mounted APK set and open Smart Life |
+| `POST /v1/account/prepare` | Fill login or start sign-up according to `SMART_LIFE_MODE` |
+| `POST /v1/login/submit` | Submit the current login form and handle the agreement |
+| `POST /v1/signup/continue` | Accept JSON with a six-digit `code`, set the password, and finish onboarding |
+| `GET /v1/rooms` | List rooms by home |
+| `GET /v1/account-security` | Read region, authorizations, projects, and User Code |
+| `POST /v1/scan/qr` | Accept a raw base64 image as `text/plain` and submit it to the scanner |
+| `POST /v1/add-device` | Open Add Device with a running Intel Bluetooth bridge |
+
+Run `./use-bridge11.sh` in a Dell terminal and keep that session open while pairing through `/v1/add-device`. If Smart Life asks for Location to discover nearby devices, the controller uses Android’s one-time permission. For idle periods, `sudo docker compose stop redroid` frees Android’s memory and preserves the data volume. Run `./start.sh` to boot it again. The API service can stay running and returns HTTP 503 for Android operations while ADB is unavailable.
+
+### Keep Android state in swap while idle
+
+Before an Android operation, the controller locks its automation file and checks whether ReDroid needs to wake. It records `starting`, `running`, and `finished` with UTC timestamps, duration, and outcome. The controller stores the latest job and its idle deadline in `/var/lib/redroid-controller/automation.json` on the `controller-state` volume. A concurrent operation receives HTTP 409.
+
+The controller checks the file every five seconds. Five minutes after the latest job finishes, it asks the Dell power agent to freeze ReDroid and reclaim RAM toward 120 MiB. A new job resets the deadline. If an Intel bridge session is active, the controller checks again after the bridge ends. The deadline survives an API restart, and the API stays up while Android is frozen.
+
+The power service runs as the Dell login user and accepts `wake`, `idle`, or `status` over a private Unix socket. The three power routes return `state`, `ram_mib`, and `swap_mib`. Use `/v1/android/wake` before direct ADB, scrcpy, or an Intel bridge session. An explicit wake clears the idle deadline until the next automation finishes or you call `/v1/android/idle`. The host helper `./android-idle.sh` accepts the same power commands on the Dell.
+
+`GET /v1/android/scrcpy` returns the `launcher` to run from your Mac checkout, plus the individual viewing commands. Reading it leaves the Android power state and idle deadline as they are. Set `SCRCPY_SSH_HOST` and `SCRCPY_LOCAL_ADB_PORT` in the Compose `.env` to match your Mac’s SSH alias and local ADB tunnel port.
 
 The repo contains the Compose setup, Android configuration, and automation. Android app data and the Smart Life APK live outside the repo.

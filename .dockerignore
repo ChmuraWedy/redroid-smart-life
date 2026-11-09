@@ -1,7 +1,10 @@
 *
 !Dockerfile.controller
 !requirements.txt
+!requirements-api.txt
 !smart_life_add_device.py
 !smart_life_login.py
 !smart_life_account.py
 !smart_life_scan_qr.py
+!controller_api.py
+!controller_automation.py

@@ -1,0 +1,15 @@
+[Unit]
+Description=ReDroid Smart Life power agent for %i
+After=docker.service
+Requires=docker.service
+PartOf=docker.service
+
+[Service]
+User=%i
+WorkingDirectory=~
+ExecStart=/usr/bin/python3 redroid-smart-life/android_power_agent.py
+UMask=0077
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target

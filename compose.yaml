@@ -38,9 +38,43 @@ services:
     build: *controller_build
     entrypoint: [python, smart_life_scan_qr.py]
 
+  controller-api:
+    profiles: [api]
+    image: redroid-smart-life-controller:local
+    build: *controller_build
+    entrypoint: [python, -m, uvicorn, controller_api:app]
+    command: [--host, 0.0.0.0, --port, "8080", --workers, "1", --no-access-log]
+    ports:
+      - "127.0.0.1:${REDROID_API_PORT:-18765}:8080"
+    environment:
+      REDROID_ADB_PORT: ${REDROID_ADB_PORT:-5555}
+      REDROID_API_PORT: ${REDROID_API_PORT:-18765}
+      SCRCPY_SSH_HOST: ${SCRCPY_SSH_HOST:-dell5070}
+      SCRCPY_LOCAL_ADB_PORT: ${SCRCPY_LOCAL_ADB_PORT:-15559}
+    secrets:
+      - controller_api_token
+      - smart_life_login
+    volumes:
+      - controller-state:/var/lib/redroid-controller
+      - type: bind
+        source: ./runtime
+        target: /run/android-power
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${SMART_LIFE_APK_DIR:-./apks}
+        target: /apks
+        read_only: true
+        bind:
+          create_host_path: false
+
 secrets:
   smart_life_login:
     file: ${SMART_LIFE_SECRETS_FILE:-./secrets/smart-life.env}
+  controller_api_token:
+    file: ./secrets/controller-api-token
 
 volumes:
   android-data:
+  controller-state:

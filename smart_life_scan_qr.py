@@ -17,13 +17,13 @@ from PIL import Image
 
 from smart_life_account import ACCOUNT_ACTIVITY, SETTINGS_ACTIVITY, click
 from smart_life_add_device import (
-    HOME_ACTIVITY, LAUNCH_ACTIVITY, PACKAGE, connect_android, current_screen, run, smart_life_id, wait_for,
+    HOME_ACTIVITY, LAUNCH_ACTIVITY, PACKAGE, allow_permission, connect_android, current_screen, run,
+    smart_life_id, wait_for,
 )
 
 
 SCANNER_ACTIVITY = "com.thingclips.smart.mlkit.qrcode.activity.CaptureActivity"
 ALBUM_ACTIVITY = "com.thingclips.smart.gallery.GalleryPickerAct"
-PERMISSION_PACKAGE = "com.android.permissioncontroller"
 MEDIA_URI = "content://media/external/images/media"
 MAX_INPUT_BYTES = 12 * 1024 * 1024
 
@@ -47,15 +47,6 @@ def decode_image(source):
     except (binascii.Error, OSError, SyntaxError, ValueError, Image.DecompressionBombError):
         raise RuntimeError("Expected a valid base64 PNG or JPEG image on stdin.") from None
     return content, extension
-
-
-def allow_permission(android, message, button):
-    prompt = android(packageName=PERMISSION_PACKAGE, resourceId=f"{PERMISSION_PACKAGE}:id/permission_message",
-                     text=message)
-    if prompt.exists:
-        allow = android(packageName=PERMISSION_PACKAGE, resourceId=f"{PERMISSION_PACKAGE}:id/{button}")
-        if not allow.click_exists(timeout=5):
-            raise RuntimeError("Could not grant Smart Life the permission needed for QR import.")
 
 
 def scanner_ready(android):
@@ -137,13 +128,7 @@ def stage_and_scan(android, adb, content, extension):
             run([*adb, "shell", "rmdir", folder], check=False)
 
 
-def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--adb-serial", default="redroid:5555", help="Android ADB host and port")
-    args = parser.parse_args()
-    content, extension = decode_image(sys.stdin.buffer)
-    adb = ["adb", "-s", args.adb_serial]
-    android = connect_android(args.adb_serial)
+def scan_qr(android, adb, content, extension):
     try:
         open_scanner(android, adb)
     except RuntimeError:
@@ -151,6 +136,15 @@ def main():
             raise
         open_scanner(android, adb)
     stage_and_scan(android, adb, content, extension)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--adb-serial", default="redroid:5555", help="Android ADB host and port")
+    args = parser.parse_args()
+    content, extension = decode_image(sys.stdin.buffer)
+    adb = ["adb", "-s", args.adb_serial]
+    scan_qr(connect_android(args.adb_serial), adb, content, extension)
     print("The QR image was submitted to Smart Life's scanner. Check the result in scrcpy.")
 
 

@@ -1,6 +1,9 @@
 .bridge.lock
+.idle.lock
 .env
 /secrets/
+/apks/
+/runtime/
 .venv/
 __pycache__/
 *.apk
